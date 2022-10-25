@@ -1,0 +1,166 @@
+# install packages 
+BiocManager::install("DESeq2")
+BiocManager::install("EnhancedVolcano")
+
+#prerequisite
+library(ggplot2)
+library(DESeq2)
+library(pheatmap)
+library(biomaRt)
+library(EnhancedVolcano)
+
+#import count data&metadata
+#changing working directory 
+setwd("/Users/16suidexiaobiaomei/Desktop/BL5631")
+#read file
+metadata <- read.csv("samples.csv") 
+rownames(metadata) <- metadata$sampleID
+#import all the files as a list with each element of the list being the read in file
+f <- lapply(metadata$filename,  
+            read.table,
+            header=TRUE)
+names(f) <- metadata$sampleID
+# different units for RNA-seq data
+colnames(f[[1]])
+# scatter plot about the difference between length and effective length
+par(mfrow=c(1,2))
+plot(y=f$endodermal1$effective_length+1,
+     x=f$endodermal1$length+1)
+
+plot(y=log10(f$endodermal1$effective_length+1),
+     x=log10(f$endodermal1$length+1))
+lines(y=1:5, x=1:5, col="red")
+#round off the decimals
+countdf <- cbind(f[[1]]$expected_count,
+                 f[[2]]$expected_count,
+                 f[[3]]$expected_count,
+                 f[[4]]$expected_count)
+#change the rawnames and colnames of countf
+rownames(countdf) <- f[[1]]$gene_id
+colnames(countdf) <- names(f)
+# change the data form to matrix
+countmat <- as.matrix(countdf)
+#make the column cells are all integers
+countmat.int <- apply(countmat, 2, function(x) round(x))
+#pre-filtering: remove zero expressing across all samples
+par(mfrow=c(1,1))
+#see the frequency table of each rowsum
+barplot(table(rowSums(countmat.int>0)))
+#remove zero expressing
+countmat.int2 <- countmat.int[apply(countmat.int,1, function(x) !any(x==0)),]
+#pipeline overview
+#column names of countData matches the row names of the metadata.
+all(rownames(metadata)==colnames(countmat.int2))
+#runs DESeq2
+dds <- DESeqDataSetFromMatrix(
+  countData = countmat.int2,
+  colData = metadata,
+  design = ~ type)
+
+dds <- DESeq(dds)
+res <- results(dds)
+
+colData(dds)$sizeFactor
+
+#find the genometric mean per gene
+find.gmean <- function(myvec) {
+  # we only consider values that are not zero
+  gmean <- exp(mean(log(myvec[myvec>0])))
+  if (all(myvec==0)) {
+    return(0)
+  } else {
+    return(gmean)
+  }
+}
+gene.gmean <- apply(countmat.int2,
+                    1,
+                    find.gmean)
+#calculate the ratios of each sample to the reference
+gene.ratio <- data.frame(endodermal1=NA,
+                         endodermal2=NA,
+                         stemcell1=NA,
+                         stemcell2=NA)
+
+for (i in 1:nrow(countmat.int2)) {
+  gene.ratio <- rbind(gene.ratio,
+                      countmat.int2[i,]/gene.gmean[i])
+}
+
+gene.ratio <- gene.ratio[-1,]
+#using sapply to calculate the ratio
+gene.ratio <- t(sapply(1:nrow(countmat.int2),
+function(x) 
+  countmat.int2[x,]/gene.gmean[x]))
+#find the median of the ratios
+median.ratios <- apply(gene.ratio, 2,
+                       function(x)
+                         median(x, na.rm=TRUE))
+median.ratios
+sizeFactors(dds)
+# the size factors sort of correspond to the library size
+plot(sizeFactors(dds), colSums(counts(dds)))
+# this normalization factors are used to divide the counts.
+counts(dds, normalized=FALSE)[5,]/sizeFactors(dds) == counts(dds, normalized=TRUE)[5,]
+#normalizaion 
+par(mfrow=c(1,2)) 
+## non-normalized
+boxplot(log2(counts(dds)+1), notch=TRUE,
+        main = "Non-normalized read counts",
+        ylab="log2(read counts)", cex = 0.6)
+## size-factor normalized values
+boxplot(log2(counts(dds, normalize= TRUE) +1), notch=TRUE,
+        main = "Size-factor-normalized read counts",
+        ylab="log2(read counts)", cex=0.6)
+#examine the results
+summary(res)
+res.sig <- res[(res$padj<0.01)&(!is.na(res$padj)),]
+res.sig.up <- res.sig[res.sig$log2FoldChange > 1,]
+res.sig.down <- res.sig[res.sig$log2FoldChange < (-1),]
+
+res.sig.up <- res.sig.up[order(res.sig.up$padj,
+                               decreasing=FALSE),]
+res.sig.down <- res.sig.down[order(res.sig.down$padj,
+                                   decreasing=FALSE),]
+#generate regularized log transformation(rlog) plots
+log.norm.counts <- log2(counts(dds, normalized=TRUE))
+rlog.norm.counts <- assay(rlog(dds))
+plot(log.norm.counts[,1:2], cex=0.1, main="size factor and log2-transformed")
+plot(rlog.norm.counts[,1:2], cex=0.1, main="rlog transformed")
+#use PCA plots to evaluate sample group
+plotPCA(rlog(dds), intgroup="type")
+#Differential expression plots
+par(mfrow=c(1,2))
+boxplot(rlog.norm.counts[rownames(res.sig.up)[1:10],], main="Top 10 upregulated genes")
+boxplot(rlog.norm.counts[rownames(res.sig.down)[1:10],], main="Top 10 downregulated genes")
+norm.mat <- rlog.norm.counts[c(rownames(res.sig.up)[1:20],
+                               rownames(res.sig.down)[1:20]),]
+up.mat <- norm.mat[1:20,]
+down.mat <- norm.mat[21:40,]
+#use MA plot and Volcano plot to summarize the differential expression testing results
+plotMA(res)
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = "log2FoldChange",
+                y="padj")
+#heatmap
+pheatmap(norm.mat)
+#Mapping Gene IDs
+diffgenes <- data.frame(ensembl_gene_id_version=rownames(norm.mat),
+                        ensembl_gene_id=NA)
+diffgenes$ensembl_gene_id <- sapply(diffgenes$ensembl_gene_id_version,
+                                    function(x)
+                                      strsplit(x,"[.]")[[1]][1])
+mart <- useEnsembl("ensembl","hsapiens_gene_ensembl")
+z <- getBM(c("ensembl_gene_id","hgnc_symbol"),
+           "ensembl_gene_id",
+           diffgenes$ensembl_gene_id,
+           mart)
+diffgenes.symbol <- merge(diffgenes, z)
+symbols <- diffgenes.symbol[match(rownames(norm.mat),
+                                  diffgenes.symbol$ensembl_gene_id_version),"hgnc_symbol"]
+rownames(norm.mat) <- symbols
+pheatmap(norm.mat,
+         scale="row")
+
+
+
